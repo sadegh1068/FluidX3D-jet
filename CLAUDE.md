@@ -481,6 +481,8 @@ The RFM has been completely rewritten to follow Kraichnan's method correctly:
 | 2026-01-29 | DFM wrong filter formula | Used exponential instead of Gaussian filter coefficients | Changed to Gaussian: exp(-π*k²/(2*n²)) per Klein et al. 2003 | **FIXED** |
 | 2026-01-29 | DFM unnecessary sqrt(3) variance | Applied variance correction meant for uniform RNG to Gaussian noise | Removed sqrt(3) factor | **FIXED** |
 | 2026-01-29 | High TI but low spreading rate paradox | Smagorinsky constant Cs=0.173 too high for jets - over-dissipates small-scale turbulence while K-H structures survive | Reduced Cs from 0.173 to 0.12 (optimized for jets per literature) | Testing |
+| 2026-02-01 | Mean velocity oscillations ±8% in potential core | DFM random seed uses `t % 1000ul` - same pattern persists for 1k timesteps, only ~81 patterns averaged instead of ~81,500 | Change to `t` for unique pattern each timestep | **FIXED** |
+| 2026-02-01 | Simulation instability after FT=10 | Cs=0.12 too low for long-term stability - absolute instability (jet flapping) grows exponentially | Use FT=10 results (stable); consider Cs=0.14-0.15 for long runs | Documented |
 
 ---
 

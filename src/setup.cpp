@@ -42,7 +42,7 @@ void main_setup() { // benchmark; required extensions in defines.hpp: BENCHMARK,
 #ifndef BENCHMARK
 void main_setup() { // Simple rectangular jet test; required extensions: EQUILIBRIUM_BOUNDARIES, SUBGRID, INTERACTIVE_GRAPHICS
 	// ################################################################## define simulation box size, viscosity and volume force ###################################################################
-	const uint memory = 5000u; // MB VRAM
+	const uint memory = 6000u; // MB VRAM
 	const float lbm_u = 0.05f; // inlet velocity in LBM units
 
 	// Re = U * h / nu => nu = U * h / Re

@@ -1605,7 +1605,8 @@ string opencl_c_container() { return R( // ########################## begin of O
 				int zz = ((int)xyz.z + kz + (int)def_Nz) % (int)def_Nz;
 
 				// Hash-based pseudo-random number generation (deterministic per position and time)
-				uint seed = (uint)yy * 73856093u ^ (uint)zz * 19349663u ^ (uint)(t % 1000ul) * 83492791u;
+				// NOTE: Using full timestep t (not t%N) ensures unique pattern each timestep for proper time averaging
+				uint seed = (uint)yy * 73856093u ^ (uint)zz * 19349663u ^ (uint)t * 83492791u;
 
 				// Generate 3 independent random numbers using xorshift-style mixing
 				seed = (seed ^ (seed >> 16)) * 0x45d9f3bu;

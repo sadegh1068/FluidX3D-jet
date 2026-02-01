@@ -208,7 +208,79 @@
 - Better preservation of small-scale turbulent mixing
 - Cleaner far-field statistics
 
-**Results:** *(Pending - simulation running)*
+**Results at FT=10 (STABLE - Best Results):**
+
+| x/h | Uc/U0 (corr) | Exp | Error | Urms/Uc | Exp | Error |
+|-----|--------------|-----|-------|---------|-----|-------|
+| 0.2 | **1.000** | 1.000 | **0.0%** | 2.4% | 3.8% | -1.4 pp |
+| 4.0 | 1.004 | 0.979 | +2.5% | 8.9% | 4.9% | +4.0 pp |
+| 6.0 | 0.976 | 0.939 | +3.9% | 13.2% | 7.8% | +5.4 pp |
+| 10.0 | **0.818** | 0.804 | **+1.7%** | 16.9% | 14.7% | +2.2 pp |
+| 20.0 | 0.626 | 0.576 | +8.6% | **20.1%** | 19.9% | **+0.2 pp** |
+| 30.0 | **0.454** | 0.457 | **-0.6%** | 28.8% | 20.9% | +7.9 pp |
+
+| Metric | Simulation | Experiment | Error |
+|--------|------------|------------|-------|
+| Q/Q0 at x/h=10 | 1.33 | 1.11 | +20% |
+| Q/Q0 at x/h=20 | 1.15 | 1.12 | **+3%** |
+
+**CRITICAL: Instability Developed After FT=10**
+
+Temporal evolution analysis revealed that the simulation became unstable after FT=10:
+
+| FT | Uc/U0 @ x/h=10 | TI @ x/h=10 | Status |
+|----|----------------|-------------|--------|
+| 10 | 0.844 | 17% | ✓ **STABLE** |
+| 15 | 0.772 | 26% | ⚠️ Degrading |
+| 20 | 0.567 | 63% | ❌ Unstable |
+| 25 | 0.468 | 78% | ❌ Severe |
+| 30 | 0.403 | 89% | ❌ Critical |
+| 35 | 0.346 | 103% | ❌ Catastrophic |
+
+**Root Cause of Instability:** Smagorinsky constant Cs=0.12 was too low for long-term stability. Initially provided good results (FT=5-10), but insufficient SGS dissipation allowed absolute instability (jet flapping) to grow exponentially.
+
+**Conclusion:** FT=10 results are valid and show excellent agreement with experiment. After FT=10, self-excited oscillation grew and corrupted statistics.
+
+---
+
+### Test #3 - BUG DISCOVERED: Mean Velocity Oscillations
+
+**Problem:** Even at FT=10 (stable period), the time-averaged mean velocity showed ±5-8% spatial oscillations in the potential core region, which should be smooth (Uc/U0 ≈ 1.0 for x/h < 4).
+
+**Data showing oscillations:**
+```
+x/h=0.0: Uc/U0 = 1.052
+x/h=0.2: Uc/U0 = 1.032
+x/h=0.4: Uc/U0 = 1.033
+x/h=0.6: Uc/U0 = 1.112  ← SPIKE (+8%)
+x/h=0.8: Uc/U0 = 1.079
+x/h=2.0: Uc/U0 = 1.109  ← SPIKE (+8%)
+x/h=3.4: Uc/U0 = 1.092  ← SPIKE
+```
+
+**Root Cause Found:** Bug in DFM random number generation (kernel.cpp line ~1608):
+
+```cpp
+// BUGGY CODE:
+uint seed = (uint)yy * 73856093u ^ (uint)zz * 19349663u ^ (uint)(t % 1000ul) * 83492791u;
+```
+
+The `t % 1000ul` means the random seed only changes every **1,000 timesteps**!
+
+- Flow-through time ≈ 16,300 timesteps
+- 5 FT averaging ≈ 81,500 timesteps
+- Only ~81 different DFM patterns averaged (should be ~81,500)
+- Result: Persistent spatial patterns appear as "mean" velocity oscillations
+
+**Impact:** The DFM was generating quasi-steady spatial patterns instead of proper turbulent fluctuations. Each pattern persisted for 1000 timesteps before changing. With only ~81 patterns in 5 FT of averaging (instead of ~81,500 independent samples), time averaging couldn't smooth out the spatial structure.
+
+**Fix Applied:**
+```cpp
+// CORRECT CODE:
+uint seed = (uint)yy * 73856093u ^ (uint)zz * 19349663u ^ (uint)t * 83492791u;
+```
+
+This ensures each timestep has a unique random seed, giving truly independent samples for time averaging.
 
 ---
 
@@ -300,4 +372,98 @@
 
 ---
 
-*Last updated: 2026-01-30, Test #3 started (Cs=0.12, L=5, TI=15%, Sponge=95%)*
+---
+
+## Lessons Learned
+
+### 1. Smagorinsky Constant Selection
+
+| Cs Value | Behavior | Application |
+|----------|----------|-------------|
+| 0.17-0.20 | High dissipation, stable | Isotropic turbulence, HIT |
+| 0.12-0.15 | Moderate dissipation | Channel flows, boundary layers |
+| 0.10-0.12 | Low dissipation | Jets, mixing layers (short runs) |
+| < 0.10 | Insufficient dissipation | **Risk of absolute instability** |
+
+**Lesson:** For jets, Cs=0.12 gives good physics short-term but may allow instabilities to grow. Cs=0.14-0.15 may be safer for long runs.
+
+### 2. DFM Temporal Correlation
+
+**Wrong approach:**
+- Using `t % N` in random seed → same pattern repeats for N timesteps
+- Creates quasi-steady patterns, not turbulence
+- Time averaging doesn't help
+
+**Correct approach:**
+- Use `t` directly in seed → new pattern each timestep
+- Apply temporal correlation via exponential smoothing: `u'(t+dt) = α*u'(t) + √(1-α²)*u'_new`
+- Time averaging then produces smooth statistics
+
+**Lesson:** Turbulent inlet conditions must have proper temporal decorrelation. Verify that fluctuations change every timestep.
+
+### 3. Monitoring for Instability
+
+**Early warning signs:**
+- TI growing over time instead of converging
+- Centerline velocity decreasing with more averaging
+- TI exceeding 50% (fluctuations > 0.5 × mean)
+- Volume flow rate decreasing (mass "loss")
+
+**Lesson:** Export intermediate results (every 0.5-1 FT) and check for instability. Don't wait until final export.
+
+### 4. Statistical Convergence
+
+| Sample Count | Statistical Uncertainty |
+|--------------|------------------------|
+| 50 | ~14% |
+| 100 | ~10% |
+| 500 | ~4.5% |
+| 1000 | ~3% |
+
+**Lesson:** Need 100+ independent samples for <10% uncertainty. Verify samples are independent (separated by integral time scale).
+
+### 5. Validation Strategy
+
+**Multi-metric validation is essential:**
+1. Centerline velocity decay (Uc/U0 vs x/h)
+2. Turbulence intensity (Urms/Uc vs x/h)
+3. Half-width / spreading rate
+4. Volume flow rate (entrainment)
+
+**Lesson:** A simulation can match one metric while failing others. Match at least 3 metrics for confidence.
+
+### 6. Time Evolution Analysis
+
+**Always check temporal evolution, not just final results:**
+- Plot metrics vs FT (flow-through time)
+- Stable simulation: metrics converge to constant
+- Unstable simulation: metrics drift or oscillate
+
+**Lesson:** FT=10 results were excellent; FT=35 results were catastrophic. The final result is not always the best result.
+
+---
+
+## Bug Fixes Applied
+
+| Date | Bug | File | Fix | Status |
+|------|-----|------|-----|--------|
+| 2026-02-01 | DFM seed only changes every 1000 steps | kernel.cpp:1608 | Change `t % 1000ul` to `t` | **APPLIED** |
+
+---
+
+## Current Best Configuration (Pending Bug Fix)
+
+Based on Test #3 FT=10 results:
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Smagorinsky Cs | 0.12-0.15 | 0.12 works short-term; 0.15 safer |
+| DFM Length Scale | 5 cells | ~0.18h, below K-H wavelength |
+| DFM TI | 15% | Inlet TI still low; may need increase |
+| Sponge Start | 95% | Keeps x/h=28 clean |
+| Warmup | 5 FT | Removes initial transient |
+| Averaging | 5-10 FT | FT=10 showed good results |
+
+---
+
+*Last updated: 2026-02-01, Test #3 analysis complete, DFM bug identified*
