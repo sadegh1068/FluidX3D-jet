@@ -112,7 +112,7 @@ void main_setup() { // benchmark; required extensions in defines.hpp: BENCHMARK,
 #ifndef BENCHMARK
 void main_setup() { // Simple rectangular jet test; required extensions: EQUILIBRIUM_BOUNDARIES, SUBGRID, INTERACTIVE_GRAPHICS
 	// ################################################################## define simulation box size, viscosity and volume force ###################################################################
-	const uint memory = 35000u; // MB VRAM (limited by 24GB max OpenCL buffer allocation on RTX PRO 6000)
+	const uint memory = 24000u; // MB VRAM for cloud VM (RTX PRO 6000 Blackwell, gives h≈58)
 	// Plane jet with tanh inlet profile - no nozzle, no correction factor needed
 	// U(y) = U_j/2 * (1 + tanh((h/2 - |y|) / (2*theta))), h/theta = 20
 	const float lbm_u = 0.05f; // inlet velocity in LBM units (jet centerline velocity)
@@ -206,9 +206,7 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 		}
 	});
 	// ####################################################################### run simulation ##########################################################################
-#ifdef GRAPHICS
 	lbm.graphics.visualization_modes = VIS_FIELD;
-#endif // GRAPHICS
 
 	// Calculate flow-through time (domain length / inlet velocity)
 	const float domain_length = (float)Nx;
@@ -360,7 +358,7 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 			}
 			const string filename = path + "fig4_lateral_profiles" + (suffix.empty() ? "" : "_FT" + suffix) + ".csv";
 			std::ofstream file(filename);
-			file << "y/h"; // Output y/h (physical coordinate); post-processing converts to y/y0.5 per station using fig4_y05_values
+			file << "y/y0.5"; // Changed from y/h to y/y0.5 to match Ahmed et al. Fig 4
 			for(int i = 0; i < num_fig4; i++) {
 				file << ",U/Uc_xh" << (int)fig4_xh[i];
 			}
@@ -392,10 +390,10 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 			}
 			for(uint iy = 0; iy < lateral_points; iy++) {
 				const double y_rel = (double)iy - (double)lateral_extent;
-				// Output y/h (physical coordinate, station-independent)
-				// Post-processing converts to y/y0.5 per station using fig4_y05_values CSV
-				const double y_over_h = y_rel / (double)h_cells;
-				file << y_over_h;
+				// Station-specific y/y0.5 normalization for proper self-similar collapse
+				// Each station uses its OWN y0.5, matching Ahmed et al. Fig 4 convention
+				const double y_over_y05 = y_rel / y05_at_station[0]; // first column: y/y0.5 from x/h=0 as reference
+				file << y_over_y05;
 				for(int i = 0; i < num_fig4; i++) {
 					int ix = fig4_stations[i];
 					if(ix >= 0 && ix < num_x_stations && x_stations[ix] > 1u && x_stations[ix] < Nx - 3u) {
