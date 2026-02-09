@@ -21,12 +21,14 @@
 //#define MOVING_BOUNDARIES // enables moving solids: set solid cells to TYPE_S and set their velocity u unequal to zero
 //#define SURFACE // enables free surface LBM: mark fluid cells with TYPE_F; at initialization the TYPE_I interface and TYPE_G gas domains will automatically be completed; allocates an extra 12 Bytes/cell
 //#define TEMPERATURE // enables temperature extension; set fixed-temperature cells with TYPE_T (similar to EQUILIBRIUM_BOUNDARIES); allocates an extra 32 (FP32) or 18 (FP16) Bytes/cell
-#define SUBGRID // enables Smagorinsky-Lilly subgrid turbulence LES model to keep simulations with very large Reynolds number stable
+#define SUBGRID // enables Smagorinsky-Lilly subgrid turbulence LES model with ZONAL Cs for jet simulation
+//#define VREMAN_SGS // enables Vreman subgrid turbulence model - DISABLED, using zonal Smagorinsky instead
 //#define PARTICLES // enables particles with immersed-boundary method (for 2-way coupling also activate VOLUME_FORCE and FORCE_FIELD; only supported in single-GPU)
 
 #define DFM_INLET // Digital Filter Method for turbulent inlet; uses TYPE_X to mark inlet cells; generates spatially correlated turbulent fluctuations
-#define SPONGE_ZONE // sponge zone near outlet to damp velocity fluctuations; prevents wave reflection
+//#define SPONGE_ZONE // DISABLED - was forcing velocity and creating artificial pressure gradients
 #define CONVECTIVE_OUTLET // Orlanski convective outlet BC; uses TYPE_Y to mark outlet cells; allows flow to exit naturally
+#define ENTRAINMENT_BC // Entrainment-friendly lateral BC; allows inflow (entrainment) at lateral TYPE_E boundaries while preventing artificial confinement
 
 #define INTERACTIVE_GRAPHICS // enable interactive graphics; start/pause the simulation by pressing P; either Windows or Linux X11 desktop must be available; on Linux: change to "compile on Linux with X11" command in make.sh
 //#define INTERACTIVE_GRAPHICS_ASCII // enable interactive graphics in ASCII mode the console; start/pause the simulation by pressing P
@@ -57,8 +59,8 @@
 #define TYPE_F 0b00001000 // fluid
 #define TYPE_I 0b00010000 // interface
 #define TYPE_G 0b00100000 // gas
-#define TYPE_X 0b01000000 // reserved type X
-#define TYPE_Y 0b10000000 // reserved type Y
+#define TYPE_X 0b01000000 // DFM turbulent inlet (used with DFM_INLET)
+#define TYPE_Y 0b10000000 // convective outlet (used with CONVECTIVE_OUTLET)
 
 #define VIS_FLAG_LATTICE  0b00000001 // lbm.graphics.visualization_modes = VIS_...|VIS_...|VIS_...;
 #define VIS_FLAG_SURFACE  0b00000010

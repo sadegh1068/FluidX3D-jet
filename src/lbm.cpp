@@ -396,8 +396,8 @@ string LBM_Domain::device_defines() const { return
 	"\n	#define TYPE_F 0x08" // 0b00001000 // fluid
 	"\n	#define TYPE_I 0x10" // 0b00010000 // interface
 	"\n	#define TYPE_G 0x20" // 0b00100000 // gas
-	"\n	#define TYPE_X 0x40" // 0b01000000 // reserved type X
-	"\n	#define TYPE_Y 0x80" // 0b10000000 // reserved type Y
+	"\n	#define TYPE_X 0x40" // 0b01000000 // DFM turbulent inlet (used with DFM_INLET)
+	"\n	#define TYPE_Y 0x80" // 0b10000000 // convective outlet (used with CONVECTIVE_OUTLET)
 
 	"\n	#define TYPE_MS 0x03" // 0b00000011 // cell next to moving solid boundary
 	"\n	#define TYPE_BO 0x03" // 0b00000011 // any flag bit used for boundaries (temperature excluded)
@@ -457,15 +457,37 @@ string LBM_Domain::device_defines() const { return
 
 #ifdef SUBGRID
 	"\n	#define SUBGRID"
+	// ZONAL Smagorinsky constants for jet simulation (Option A: reduced Cs for stability)
+	// Zone 1: Nozzle (x/h < 0)       -> Cs = 0.12 (preserve inlet TI)
+	// Zone 2: Near-field (0-8 x/h)   -> Cs = 0.15 (moderate K-H damping)
+	// Zone 3: Transition (8-15 x/h)  -> Cs = 0.14 (gentle damping)
+	// Zone 4: Far-field (>15 x/h)    -> Cs = 0.12 (matches experiment)
+	"\n	#define def_Cs_nozzle 0.12f"      // Zone 1: inside nozzle
+	"\n	#define def_Cs_nearfield 0.15f"   // Zone 2: K-H growth region
+	"\n	#define def_Cs_transition 0.14f"  // Zone 3: K-H breakdown region
+	"\n	#define def_Cs_farfield 0.12f"    // Zone 4: self-similar region
+	"\n	#define def_zone2_start -1.0f"    // x/h where Zone 2 starts (before inlet, ensures x=0 is fully Zone 2)
+	"\n	#define def_zone3_start 8.0f"     // x/h where Zone 3 starts
+	"\n	#define def_zone4_start 15.0f"    // x/h where Zone 4 starts
+	"\n	#define def_zone_blend_width 2.0f" // blending width in x/h units (tanh transition)
+	"\n	#define def_h_cells "+to_string(Ny/20u)+"u" // nozzle height in cells (= Ny/20, scales with VRAM)
+	"\n	#define def_nozzle_x 0u" // nozzle exit at x=0 (no physical nozzle, tanh profile inlet)
 #endif // SUBGRID
+
+#ifdef VREMAN_SGS
+	"\n	#define VREMAN_SGS"
+	"\n	#define def_Cv 0.07f" // Vreman constant (Cv = 2.5*Cs^2, so Cv=0.07 ~ Cs=0.17; use 0.036 for Cs~0.12)
+	"\n	#define def_Cv_floor 1e-5f" // Small stability floor (~1% of molecular viscosity) for startup
+#endif // VREMAN_SGS
 
 #ifdef DFM_INLET
 	"\n	#define DFM_INLET"
-	"\n	#define def_inlet_velocity 0.05f"
-	"\n	#define def_turbulence_intensity 0.15f" // 15% - increased for better inlet TI match
-	"\n	#define def_length_scale_y 5.0f" // integral length scale in y direction (cells) - 0.18h for longer eddy lifetime
-	"\n	#define def_length_scale_z 5.0f" // integral length scale in z direction (cells) - 0.18h for longer eddy lifetime
-	"\n	#define def_filter_width 21" // filter width = 2*ceil(2*L/dx)+1 = 2*ceil(10)+1 = 21
+	"\n	#define def_inlet_velocity 0.05f" // jet centerline velocity (no nozzle → no BL correction needed)
+	"\n	#define def_turbulence_intensity 0.05f" // peak TI in shear layer (attenuated by sech² profile in kernel)
+	"\n	#define def_length_scale_y 3.0f" // integral length scale in y (cells) - ~0.08h at h=37
+	"\n	#define def_length_scale_z 4.0f" // integral length scale in z (cells) - ~0.11h, slightly larger for spanwise
+	"\n	#define def_filter_width 17" // filter width = 2*ceil(2*max(Ly,Lz))+1 = 2*8+1 = 17 (Klein et al. 2003)
+	"\n	#define def_temporal_alpha 0.95f" // temporal correlation factor exp(-dt/T), ~0.95 for smooth time evolution
 #endif // DFM_INLET
 
 #ifdef SPONGE_ZONE
@@ -476,8 +498,12 @@ string LBM_Domain::device_defines() const { return
 
 #ifdef CONVECTIVE_OUTLET
 	"\n	#define CONVECTIVE_OUTLET"
-	"\n	#define def_outlet_velocity 0.01f" // minimum convection velocity for outlet
+	"\n	#define def_outlet_velocity 0.05f" // reference outlet velocity (matches inlet velocity)
 #endif // CONVECTIVE_OUTLET
+
+#ifdef ENTRAINMENT_BC
+	"\n	#define ENTRAINMENT_BC"
+#endif // ENTRAINMENT_BC
 
 #ifdef PARTICLES
 	"\n	#define PARTICLES"

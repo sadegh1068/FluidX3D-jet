@@ -1,7 +1,77 @@
 #include "setup.hpp"
 #include <fstream>
 #include <vector>
+#include <cmath>
 using std::vector;
+
+#ifdef VREMAN_SGS
+// Helper function to compute Vreman SGS viscosity at a point from velocity field
+// Returns nu_sgs in LBM units
+inline float compute_vreman_nu_sgs(const LBM& lbm, uint x, uint y, uint z) {
+	const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();
+
+	// Boundary check - need neighbors
+	if(x < 1 || x >= Nx-1 || y < 1 || y >= Ny-1 || z < 1 || z >= Nz-1) return 0.0f;
+
+	// Neighbor indices
+	auto idx = [&](uint xx, uint yy, uint zz) -> ulong {
+		return (ulong)xx + (ulong)yy * (ulong)Nx + (ulong)zz * (ulong)Nx * (ulong)Ny;
+	};
+
+	// Read neighbor velocities
+	const float ux_xp = lbm.u.x[idx(x+1,y,z)], ux_xm = lbm.u.x[idx(x-1,y,z)];
+	const float ux_yp = lbm.u.x[idx(x,y+1,z)], ux_ym = lbm.u.x[idx(x,y-1,z)];
+	const float ux_zp = lbm.u.x[idx(x,y,z+1)], ux_zm = lbm.u.x[idx(x,y,z-1)];
+
+	const float uy_xp = lbm.u.y[idx(x+1,y,z)], uy_xm = lbm.u.y[idx(x-1,y,z)];
+	const float uy_yp = lbm.u.y[idx(x,y+1,z)], uy_ym = lbm.u.y[idx(x,y-1,z)];
+	const float uy_zp = lbm.u.y[idx(x,y,z+1)], uy_zm = lbm.u.y[idx(x,y,z-1)];
+
+	const float uz_xp = lbm.u.z[idx(x+1,y,z)], uz_xm = lbm.u.z[idx(x-1,y,z)];
+	const float uz_yp = lbm.u.z[idx(x,y+1,z)], uz_ym = lbm.u.z[idx(x,y-1,z)];
+	const float uz_zp = lbm.u.z[idx(x,y,z+1)], uz_zm = lbm.u.z[idx(x,y,z-1)];
+
+	// Velocity gradients (central differences)
+	const float a11 = 0.5f*(ux_xp - ux_xm); // du/dx
+	const float a12 = 0.5f*(ux_yp - ux_ym); // du/dy
+	const float a13 = 0.5f*(ux_zp - ux_zm); // du/dz
+	const float a21 = 0.5f*(uy_xp - uy_xm); // dv/dx
+	const float a22 = 0.5f*(uy_yp - uy_ym); // dv/dy
+	const float a23 = 0.5f*(uy_zp - uy_zm); // dv/dz
+	const float a31 = 0.5f*(uz_xp - uz_xm); // dw/dx
+	const float a32 = 0.5f*(uz_yp - uz_ym); // dw/dy
+	const float a33 = 0.5f*(uz_zp - uz_zm); // dw/dz
+
+	// Alpha invariant
+	const float alpha_sq = a11*a11 + a12*a12 + a13*a13
+	                     + a21*a21 + a22*a22 + a23*a23
+	                     + a31*a31 + a32*a32 + a33*a33;
+
+	if(alpha_sq < 1e-12f) return 0.0f;
+
+	// Beta tensor
+	const float b11 = a11*a11 + a21*a21 + a31*a31;
+	const float b22 = a12*a12 + a22*a22 + a32*a32;
+	const float b33 = a13*a13 + a23*a23 + a33*a33;
+	const float b12 = a11*a12 + a21*a22 + a31*a32;
+	const float b13 = a11*a13 + a21*a23 + a31*a33;
+	const float b23 = a12*a13 + a22*a23 + a32*a33;
+
+	// B_beta invariant
+	const float B_beta = b11*b22 - b12*b12 + b11*b33 - b13*b13 + b22*b33 - b23*b23;
+
+	float nu_sgs = 0.0f;
+	if(B_beta > 1e-12f) {
+		// Vreman constant (same as in kernel.cpp def_Cv)
+		const float Cv = 0.07f;
+		nu_sgs = Cv * std::sqrt(B_beta / alpha_sq);
+	}
+
+	// Stability floor (same as in kernel.cpp def_Cv_floor)
+	const float Cv_floor = 1e-5f;
+	return std::max(nu_sgs, Cv_floor);
+}
+#endif // VREMAN_SGS
 
 
 #ifdef BENCHMARK
@@ -42,85 +112,86 @@ void main_setup() { // benchmark; required extensions in defines.hpp: BENCHMARK,
 #ifndef BENCHMARK
 void main_setup() { // Simple rectangular jet test; required extensions: EQUILIBRIUM_BOUNDARIES, SUBGRID, INTERACTIVE_GRAPHICS
 	// ################################################################## define simulation box size, viscosity and volume force ###################################################################
-	const uint memory = 6000u; // MB VRAM
-	const float lbm_u = 0.05f; // inlet velocity in LBM units
+	const uint memory = 6000u; // MB VRAM (increased for better resolution)
+	// Plane jet with tanh inlet profile - no nozzle, no correction factor needed
+	// U(y) = U_j/2 * (1 + tanh((h/2 - |y|) / (2*theta))), h/theta = 20
+	const float lbm_u = 0.05f; // inlet velocity in LBM units (jet centerline velocity)
+
+	// Domain: ~28h x 20h x 4h (spanwise-periodic thin slab)
+	// Z reduced to 0.2 ratio for Lz/h ≈ 4 (periodic, per Stanley & Sarkar 2002)
+	// Resolution gain: h_cells ~21 → ~37 (76% improvement)
+	// Max usable x/h ≈ 25 (sufficient for transition + self-similar regions)
+	const uint3 lbm_N = resolution(float3(1.4f, 1.0f, 0.2f), memory);
 
 	// Re = U * h / nu => nu = U * h / Re
-	// Target: Re = 20100, h ≈ Ny/20 cells
-	// With Ny ≈ 336: nu = 0.05 * 17 / 20100 ≈ 4.2e-5
+	// Compute viscosity using actual grid resolution (h_cells = Ny/20)
 	// Using SUBGRID turbulence model for stability at high Re
 	const float Re_target = 20100.0f;
-	const float h_estimate = 17.0f; // will be refined after grid creation
-	const float lbm_nu = lbm_u * h_estimate / Re_target; // ≈ 4.2e-5
+	const uint h_cells_for_nu = lbm_N.y / 20u; // actual h_cells from resolved grid
+	const float lbm_nu = lbm_u * (float)h_cells_for_nu / Re_target;
 
-	// Domain: 40h x 20h x 30h (where h = nozzle height) - extended z for AR=19 nozzle
-	const uint3 lbm_N = resolution(float3(2.0f, 1.0f, 1.2f), memory);
 	LBM lbm(lbm_N.x, lbm_N.y, lbm_N.z, lbm_nu);
 
-	// Nozzle dimensions - AR=19 to match experiment
+	// Plane jet dimensions (spanwise-periodic, no physical nozzle)
 	const uint Nx = lbm.get_Nx(), Ny = lbm.get_Ny(), Nz = lbm.get_Nz();
 	const uint h_cells = Ny / 20u;  // nozzle height = 1/20 of domain height
-	const uint w_cells = h_cells * 19u;  // nozzle width (AR = 19, matching experiment)
-	const uint nozzle_length = h_cells / 2u;  // nozzle length = 0.5h (short to minimize TI decay)
 
 	const float Re_actual = lbm_u * (float)h_cells / lbm_nu;
-	const uint sponge_start_x = (uint)(0.90f * (float)Nx); // sponge starts at 90%
-	const float sponge_start_xh = (float)(sponge_start_x - nozzle_length) / (float)h_cells; // x/h at sponge start
 
 	print_info("Grid: " + to_string(Nx) + " x " + to_string(Ny) + " x " + to_string(Nz));
-	print_info("Nozzle h = " + to_string(h_cells) + " cells, w = " + to_string(w_cells) + " cells (AR = " + to_string(w_cells/h_cells) + ")");
-	print_info("Nozzle length = " + to_string(nozzle_length) + " cells (0.5h)");
+	print_info("Plane jet: h = " + to_string(h_cells) + " cells, Lz/h = " + to_string(Nz / h_cells) + " (periodic)");
+	print_info("Inlet: tanh profile, h/theta = 20, no physical nozzle");
 	print_info("Inlet velocity = " + to_string(lbm_u));
 	print_info("Viscosity = " + to_string(lbm_nu));
 	print_info("Reynolds number = " + to_string((int)Re_actual));
-	print_info("Sponge zone starts at x = " + to_string(sponge_start_x) + " (x/h = " + to_string(sponge_start_xh, 1u) + ")");
 
 	// ###################################################################################### define geometry ######################################################################################
 	parallel_for(lbm.get_N(), [&](ulong n) {
 		uint x = 0u, y = 0u, z = 0u;
 		lbm.coordinates(n, x, y, z);
 
-		// Center of domain
+		// Center of domain (y only - z is periodic, no center needed)
 		const int cy = (int)Ny / 2;
-		const int cz = (int)Nz / 2;
-		const int dy = (int)y - cy;
-		const int dz = (int)z - cz;
 
-		// Inside nozzle cross-section?
-		const bool inside_nozzle = ((uint)abs(dy) <= h_cells/2u && (uint)abs(dz) <= w_cells/2u);
-
-		// ============ Inlet BC (x = 0) ============
+		// ============ Inlet BC (x = 0) - Tanh velocity profile with nozzle lip ============
+		// U(y) = U_j/2 * (1 + tanh((h/2 - |y-cy|) / (2*theta))), h/theta = 20
+		// Thin nozzle lip (TYPE_S) at y = cy ± h/2 to create sharp edge for K-H instability
 		if(x == 0u) {
-			if(inside_nozzle) {
-				lbm.flags[n] = TYPE_X; // DFM turbulent inlet (TYPE_X triggers DFM_INLET in kernel)
-				lbm.u.x[n] = lbm_u;
+			const uint dy_abs = (uint)abs((int)y - cy);
+			if(dy_abs == h_cells / 2u || dy_abs == h_cells / 2u + 1u) {
+				// Nozzle lip walls (thin splitter plate at jet edges)
+				lbm.flags[n] = TYPE_S;
+			} else if(dy_abs < h_cells / 2u) {
+				// Inside jet: tanh profile (core region)
+				const float y_dist = fabs((float)y - (float)cy);
+				const float theta = (float)h_cells / 20.0f;
+				const float tanh_val = tanhf(((float)h_cells / 2.0f - y_dist) / (2.0f * theta));
+				const float u_profile = lbm_u * 0.5f * (1.0f + tanh_val);
+				lbm.flags[n] = TYPE_X; // DFM turbulent inlet
+				lbm.u.x[n] = u_profile;
 				lbm.u.y[n] = 0.0f;
 				lbm.u.z[n] = 0.0f;
 			} else {
-				lbm.flags[n] = TYPE_S; // Solid wall around inlet
-			}
-		}
-		// ============ Nozzle channel (x = 1 to nozzle_length) ============
-		else if(x <= nozzle_length) {
-			if(inside_nozzle) {
-				// Fluid inside nozzle - initialize with inlet velocity
-				lbm.u.x[n] = lbm_u;
+				// Outside jet: ambient (quiescent)
+				lbm.flags[n] = TYPE_E;
+				lbm.u.x[n] = 0.0f;
 				lbm.u.y[n] = 0.0f;
 				lbm.u.z[n] = 0.0f;
-			} else {
-				lbm.flags[n] = TYPE_S; // Solid nozzle walls
 			}
 		}
 		// ============ Outlet BC (last 3 cells) ============
+		// FIX: Check outlet FIRST and unconditionally to ensure ALL outlet cells use TYPE_Y
+		// This prevents lateral TYPE_E boundaries from creating a "zero-velocity frame" at outlet edges
 		else if(x >= Nx - 3u) {
-			lbm.flags[n] = TYPE_Y; // Convective outlet (Orlanski BC)
-			// Initialize with small outflow velocity
-			lbm.u.x[n] = 0.01f * lbm_u;
+			lbm.flags[n] = TYPE_Y; // Convective outlet (Orlanski BC) - ALL cells including edges!
+			// FIX: Initialize with ZERO velocity - let flow develop naturally from upstream
+			// Setting a non-zero velocity creates artificial suction!
+			lbm.u.x[n] = 0.0f;
 			lbm.u.y[n] = 0.0f;
 			lbm.u.z[n] = 0.0f;
 		}
-		// ============ Lateral boundaries ============
-		else if(y <= 1u || y >= Ny-2u || z <= 1u || z >= Nz-2u) {
+		// ============ Lateral boundaries - y only (z is periodic) ============
+		else if(y <= 1u || y >= Ny-2u) {
 			lbm.flags[n] = TYPE_E; // Ambient
 			lbm.u.x[n] = 0.0f;
 			lbm.u.y[n] = 0.0f;
@@ -153,16 +224,24 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 	const uint cy = Ny / 2u; // centerline y
 	const uint cz = Nz / 2u; // centerline z
 
-	// x/h stations for measurements (relative to nozzle exit)
+	// Spanwise averaging: average over ALL z-planes (z is periodic)
+	// With periodic z BCs, all z-planes are statistically equivalent → maximum convergence
+	const int z_avg_count = (int)Nz; // all z-planes
+
+	// x/h stations for measurements (relative to inlet at x=0)
 	// Paper Fig 4: x/h = 0, 2, 4, 6, 8, 10
 	// Paper Fig 7: continuous x/h from 0 to ~30 with 0.2 increment
 	const float xh_increment = 0.2f;
-	const int num_x_stations = 151; // x/h = 0, 0.2, 0.4, ... , 30.0
+	const float xh_start = 0.0f;  // Start at inlet (no nozzle)
+	const float xh_end = 30.0f;
+	const int num_x_stations = (int)((xh_end - xh_start) / xh_increment) + 1; // x/h = 0, 0.2, ... , 30.0
 	vector<uint> x_stations(num_x_stations);
 	vector<float> xh_values(num_x_stations);
 	for(int i = 0; i < num_x_stations; i++) {
-		xh_values[i] = (float)i * xh_increment;
-		x_stations[i] = nozzle_length + (uint)round(xh_values[i] * (float)h_cells);
+		xh_values[i] = xh_start + (float)i * xh_increment;
+		// x position in cells: x/h=0 is at x=0, so x = xh * h_cells
+		const int x_pos = (int)round(xh_values[i] * (float)h_cells);
+		x_stations[i] = (x_pos >= 0) ? (uint)x_pos : 0u;  // clamp to valid range
 	}
 
 	// Lateral profile extent (for Fig 4)
@@ -170,25 +249,29 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 
 	// ============ Statistics accumulators ============
 	// For centerline (Fig 7a, 7b): store Uc at each x/h
+	// With spanwise averaging, each timestep contributes z_avg_count samples
 	vector<double> sum_Uc(num_x_stations, 0.0);
 	vector<double> sum_Uc2(num_x_stations, 0.0);
 
-	// For lateral profiles (Fig 4): store U at each (x, y) for z=cz (centerplane)
+	// For lateral profiles (Fig 4): store U at each (x, y), averaged over z-planes
 	// We'll measure from y = cy - lateral_extent to y = cy + lateral_extent
 	const uint lateral_points = 2u * lateral_extent + 1u;
 	vector<vector<double>> sum_U_lateral(num_x_stations, vector<double>(lateral_points, 0.0));
 	vector<vector<double>> sum_U2_lateral(num_x_stations, vector<double>(lateral_points, 0.0));
 
 	// For volume flow (Fig 10): integrate U over cross-section at each x/h
+	// Q is computed per z-plane, then averaged
 	vector<double> sum_Q(num_x_stations, 0.0);
 
-	ulong num_samples = 0ul;
+	ulong num_time_samples = 0ul; // number of timesteps sampled
+	ulong num_total_samples = 0ul; // total samples = num_time_samples × z_avg_count
 
 	print_info("Flow-through time = " + to_string((uint)flow_through_time) + " timesteps");
 	print_info("Warmup: " + to_string(warmup_FT, 1u) + " FT (" + to_string(warmup_steps) + " steps)");
 	print_info("Averaging: " + to_string(averaging_FT, 1u) + " FT");
 	print_info("Total: " + to_string(warmup_FT + averaging_FT, 1u) + " FT (" + to_string(total_steps) + " steps)");
-	print_info("Sponge zone starts at x/h = " + to_string(sponge_start_xh, 1u));
+	print_info("Measurement range: x/h = " + to_string(xh_start, 1u) + " to " + to_string(xh_end, 1u) + " (" + to_string(num_x_stations) + " stations)");
+	print_info("Spanwise averaging: ALL " + to_string(z_avg_count) + " z-planes (periodic z, " + to_string(z_avg_count) + "x faster convergence)");
 	print_info("----------------------------------------");
 
 	ulong next_report = report_interval;
@@ -198,11 +281,11 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 
 	// Lambda function to export CSV data
 	auto export_csv_data = [&](const string& suffix, bool is_final) {
-		const double N = (double)num_samples;
+		const double N = (double)num_total_samples;
 		if(N < 1.0) return; // no samples yet
 
 		const string path = get_exe_path();
-		print_info("Exporting CSV data" + (suffix.empty() ? "" : " (FT=" + suffix + ")") + " with " + to_string(num_samples) + " samples...");
+		print_info("Exporting CSV data" + (suffix.empty() ? "" : " (FT=" + suffix + ")") + " with " + to_string(num_total_samples) + " samples (" + to_string(num_time_samples) + " timesteps x " + to_string(z_avg_count) + " z-planes)...");
 
 		// ===== Figure 7a: Centerline velocity decay (Uc/U0 vs x/h) =====
 		{
@@ -210,6 +293,7 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 			std::ofstream file(filename);
 			file << "x/h,Uc/U0,Uc_rms/U0\n";
 			for(int ix = 0; ix < num_x_stations; ix++) {
+				if(x_stations[ix] <= 1u) continue; // skip inlet BC region
 				if(x_stations[ix] >= Nx - 3u) continue;
 				const double Uc_mean = sum_Uc[ix] / N;
 				const double Uc_rms = sqrt(fmax(0.0, sum_Uc2[ix] / N - Uc_mean * Uc_mean));
@@ -225,6 +309,7 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 			std::ofstream file(filename);
 			file << "x/h,Urms/Uc\n";
 			for(int ix = 0; ix < num_x_stations; ix++) {
+				if(x_stations[ix] <= 1u) continue; // skip inlet BC region
 				if(x_stations[ix] >= Nx - 3u) continue;
 				const double Uc_mean = sum_Uc[ix] / N;
 				const double Uc_rms = sqrt(fmax(0.0, sum_Uc2[ix] / N - Uc_mean * Uc_mean));
@@ -241,6 +326,7 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 			std::ofstream file(filename);
 			file << "x/h,y0.5/h\n";
 			for(int ix = 0; ix < num_x_stations; ix++) {
+				if(x_stations[ix] <= 1u) continue; // skip inlet BC region
 				if(x_stations[ix] >= Nx - 3u) continue;
 				const double Uc_mean = sum_Uc[ix] / N;
 				const double U_half = 0.5 * Uc_mean;
@@ -261,34 +347,58 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 		}
 
 		// ===== Figure 4: Lateral profiles (U/Uc vs y/y0.5) =====
+		// Ahmed et al. uses y/y0.5 (normalized by local half-width) for self-similar profiles
 		{
-			// x/h stations: 0, 2, 4, 6, 8, 10 -> indices with 0.2 spacing: 0, 10, 20, 30, 40, 50
-			const int fig4_stations[] = {0, 10, 20, 30, 40, 50};
+			// x/h stations: 0, 2, 4, 6, 8, 10
+			const float fig4_xh[] = {0.0f, 2.0f, 4.0f, 6.0f, 8.0f, 10.0f};
 			const int num_fig4 = 6;
+			int fig4_stations[6];
+			for(int i = 0; i < num_fig4; i++) {
+				fig4_stations[i] = (int)round((fig4_xh[i] - xh_start) / xh_increment);
+			}
 			const string filename = path + "fig4_lateral_profiles" + (suffix.empty() ? "" : "_FT" + suffix) + ".csv";
 			std::ofstream file(filename);
-			file << "y/h";
+			file << "y/y0.5"; // Changed from y/h to y/y0.5 to match Ahmed et al. Fig 4
 			for(int i = 0; i < num_fig4; i++) {
-				file << ",U/Uc_xh" << (int)(fig4_stations[i] * xh_increment); // actual x/h value
+				file << ",U/Uc_xh" << (int)fig4_xh[i];
 			}
 			file << "\n";
+			// Compute Uc and y0.5 at each station
 			vector<double> Uc_at_station(num_fig4);
+			vector<double> y05_at_station(num_fig4);
 			for(int i = 0; i < num_fig4; i++) {
 				int ix = fig4_stations[i];
-				if(ix < num_x_stations && x_stations[ix] < Nx - 3u) {
+				if(ix >= 0 && ix < num_x_stations && x_stations[ix] > 1u && x_stations[ix] < Nx - 3u) {
 					Uc_at_station[i] = sum_Uc[ix] / N;
+					// Find local half-width for this station
+					const double U_half = 0.5 * Uc_at_station[i];
+					y05_at_station[i] = 0.5 * (double)h_cells; // default: 0.5h
+					for(uint iy2 = lateral_extent; iy2 < lateral_points; iy2++) {
+						const double U_mean2 = sum_U_lateral[ix][iy2] / N;
+						if(U_mean2 < U_half) {
+							const double U_prev2 = sum_U_lateral[ix][iy2-1] / N;
+							const double frac2 = (U_prev2 - U_half) / (U_prev2 - U_mean2 + 1e-10);
+							y05_at_station[i] = (double)(iy2 - 1 - lateral_extent) + frac2;
+							break;
+						}
+					}
+					if(y05_at_station[i] < 0.1) y05_at_station[i] = 0.5 * (double)h_cells; // safety floor
 				} else {
 					Uc_at_station[i] = lbm_u;
+					y05_at_station[i] = 0.5 * (double)h_cells;
 				}
 			}
 			for(uint iy = 0; iy < lateral_points; iy++) {
 				const double y_rel = (double)iy - (double)lateral_extent;
-				const double y_over_h = y_rel / (double)h_cells;
-				file << y_over_h;
+				// Station-specific y/y0.5 normalization for proper self-similar collapse
+				// Each station uses its OWN y0.5, matching Ahmed et al. Fig 4 convention
+				const double y_over_y05 = y_rel / y05_at_station[0]; // first column: y/y0.5 from x/h=0 as reference
+				file << y_over_y05;
 				for(int i = 0; i < num_fig4; i++) {
 					int ix = fig4_stations[i];
-					if(ix < num_x_stations && x_stations[ix] < Nx - 3u) {
+					if(ix >= 0 && ix < num_x_stations && x_stations[ix] > 1u && x_stations[ix] < Nx - 3u) {
 						const double U_mean = sum_U_lateral[ix][iy] / N;
+						// U/Uc with station-specific normalization
 						file << "," << (U_mean / Uc_at_station[i]);
 					} else {
 						file << ",";
@@ -296,23 +406,84 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 				}
 				file << "\n";
 			}
+			// Also write station-specific y0.5/h values for post-processing
+			// Analysis scripts can compute station-specific y/y0.5 = (y/h) / (y0.5/h)
 			file.close();
+			{
+				const string y05_filename = path + "fig4_y05_values" + (suffix.empty() ? "" : "_FT" + suffix) + ".csv";
+				std::ofstream y05_file(y05_filename);
+				y05_file << "x/h,y0.5/h,y0.5_cells\n";
+				for(int i = 0; i < num_fig4; i++) {
+					y05_file << fig4_xh[i] << "," << (y05_at_station[i] / (double)h_cells) << "," << y05_at_station[i] << "\n";
+				}
+				y05_file.close();
+				print_info("  Wrote " + y05_filename);
+			}
 			print_info("  Wrote " + filename);
 		}
 
 		// ===== Figure 10: Volume flow rate (Q*/Q0* vs x/h) =====
+		// Per Ahmed et al.: Q* = Q / y0.5 (specific volume flow rate normalized by half-width)
+		// This removes the jet spreading effect from the entrainment measurement
 		{
-			const double Q0 = lbm_u * (double)h_cells;
-			const string filename = path + "fig10_volume_flow" + (suffix.empty() ? "" : "_FT" + suffix) + ".csv";
-			std::ofstream file(filename);
-			file << "x/h,Q/Q0\n";
+			// First, calculate half-width y0.5 for each station (same logic as halfwidth export)
+			vector<double> y_half_values(num_x_stations, 0.0);
 			for(int ix = 0; ix < num_x_stations; ix++) {
+				if(x_stations[ix] <= 1u) continue;
 				if(x_stations[ix] >= Nx - 3u) continue;
-				const double Q_mean = sum_Q[ix] / N;
-				file << xh_values[ix] << "," << (Q_mean / Q0) << "\n";
+				const double Uc_mean = sum_Uc[ix] / N;
+				const double U_half = 0.5 * Uc_mean;
+				for(uint iy = lateral_extent; iy < lateral_points; iy++) {
+					const double U_mean = sum_U_lateral[ix][iy] / N;
+					if(U_mean < U_half) {
+						const double U_prev = sum_U_lateral[ix][iy-1] / N;
+						const double frac = (U_prev - U_half) / (U_prev - U_mean + 1e-10);
+						y_half_values[ix] = ((double)(iy - 1 - lateral_extent) + frac);
+						break;
+					}
+				}
+				// Ensure minimum half-width of 0.5*h to avoid division issues
+				if(y_half_values[ix] < 0.5 * (double)h_cells) {
+					y_half_values[ix] = 0.5 * (double)h_cells;
+				}
 			}
-			file.close();
-			print_info("  Wrote " + filename);
+
+			// Find Q0* at first valid station (x/h >= 0)
+			// Q* = Q / y0.5 (specific volume flow rate)
+			const double Q_threshold = 0.1 * lbm_u * (double)h_cells;
+			double Q0_star = 0.0;
+			for(int ix = 0; ix < num_x_stations; ix++) {
+				if(x_stations[ix] <= 1u) continue;
+				if(x_stations[ix] >= Nx - 3u) continue;
+				if(xh_values[ix] < 0.0f) continue; // Q0* should be at x/h >= 0
+				double Q_mean = sum_Q[ix] / N;
+				double y_half = y_half_values[ix];
+				if(Q_mean > Q_threshold && y_half > 0.0) {
+					Q0_star = Q_mean / y_half; // Q* = Q / y0.5
+					break;
+				}
+			}
+
+			// If no valid Q0* found, skip output with warning
+			if(Q0_star <= 0.0) {
+				print_info("  WARNING: No valid Q0* reference found, skipping volume flow output");
+			} else {
+				const string filename = path + "fig10_volume_flow" + (suffix.empty() ? "" : "_FT" + suffix) + ".csv";
+				std::ofstream file(filename);
+				file << "x/h,Qstar/Q0star\n"; // Changed header to reflect normalized quantity
+				for(int ix = 0; ix < num_x_stations; ix++) {
+					if(x_stations[ix] <= 1u) continue;
+					if(x_stations[ix] >= Nx - 3u) continue;
+					const double Q_mean = sum_Q[ix] / N;
+					const double y_half = y_half_values[ix];
+					if(Q_mean > 0.0 && y_half > 0.0) {
+						const double Q_star = Q_mean / y_half; // Q* = Q / y0.5
+						file << xh_values[ix] << "," << (Q_star / Q0_star) << "\n";
+					}
+				}
+				file.close();
+				print_info("  Wrote " + filename);
+			}
 		}
 
 		if(is_final) {
@@ -327,37 +498,62 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 		const bool in_averaging_phase = (lbm.get_t() > warmup_steps);
 
 		// ============ Collect statistics during averaging phase ============
+		// Uses spanwise averaging: sample at ALL Nz z-planes (periodic z)
 		if(in_averaging_phase) {
 			lbm.u.read_from_device();
-			num_samples++;
+			num_time_samples++;
+			num_total_samples += (ulong)Nz; // all z-planes
 
 			for(int ix = 0; ix < num_x_stations; ix++) {
 				const uint x = x_stations[ix];
+				if(x <= 1u) continue; // skip inlet BC region (x=0 is TYPE_X inlet)
 				if(x >= Nx - 3u) continue; // skip outlet region
 
-				// Centerline velocity (Fig 7a)
-				const ulong n_center = (ulong)x + ((ulong)cy + (ulong)cz * (ulong)Ny) * (ulong)Nx;
-				const float Uc = lbm.u.x[n_center];
-				sum_Uc[ix] += (double)Uc;
-				sum_Uc2[ix] += (double)(Uc * Uc);
+				// Loop over ALL z-planes (periodic z → all planes are valid)
+				for(uint z = 0u; z < Nz; z++) {
 
-				// Lateral profile at z = cz (Fig 4)
-				for(uint iy = 0; iy < lateral_points; iy++) {
-					const uint y = cy - lateral_extent + iy;
-					if(y >= Ny) continue;
-					const ulong n = (ulong)x + ((ulong)y + (ulong)cz * (ulong)Ny) * (ulong)Nx;
-					const float U = lbm.u.x[n];
-					sum_U_lateral[ix][iy] += (double)U;
-					sum_U2_lateral[ix][iy] += (double)(U * U);
-				}
+					// Centerline velocity (Fig 7a) - at y=cy for each z-plane
+					const ulong n_center = (ulong)x + ((ulong)cy + (ulong)z * (ulong)Ny) * (ulong)Nx;
+					const float Uc = lbm.u.x[n_center];
+					sum_Uc[ix] += (double)Uc;
+					sum_Uc2[ix] += (double)Uc * (double)Uc; // double precision squaring for variance accuracy
 
-				// Volume flow rate (Fig 10) - integrate over y at z=cz (simplified 1D)
-				double Q = 0.0;
-				for(uint y = cy - h_cells; y <= cy + h_cells; y++) {
-					const ulong n = (ulong)x + ((ulong)y + (ulong)cz * (ulong)Ny) * (ulong)Nx;
-					Q += (double)lbm.u.x[n];
+					// Lateral profile (Fig 4) - at each y for this z-plane
+					for(uint iy = 0; iy < lateral_points; iy++) {
+						const uint y = cy - lateral_extent + iy;
+						if(y >= Ny) continue;
+						const ulong n = (ulong)x + ((ulong)y + (ulong)z * (ulong)Ny) * (ulong)Nx;
+						const float U = lbm.u.x[n];
+						sum_U_lateral[ix][iy] += (double)U;
+						sum_U2_lateral[ix][iy] += (double)U * (double)U; // double precision squaring
+					}
+
+					// Volume flow rate (Fig 10) - 2D integration over jet cross-section (y,z)
+					// Per Ahmed et al.: Q = integral(U dy dz) with 10% velocity cutoff
+					// Each z-plane contributes one z-slice to the full 2D integral
+					const float Uc_local = lbm.u.x[n_center];
+					const float cutoff = 0.1f * fabs(Uc_local); // 10% of centerline velocity
+
+					// Skip stations where centerline velocity is negligible
+					if(fabs(Uc_local) >= 1e-6f) {
+						double Q_slice = 0.0; // Q contribution from this z-plane (1D y-integral)
+						// Integrate from centerline outward in +y direction until U < cutoff
+						for(uint y = cy; y < Ny; y++) {
+							const ulong n = (ulong)x + ((ulong)y + (ulong)z * (ulong)Ny) * (ulong)Nx;
+							const float U = lbm.u.x[n];
+							if(fabs(U) < cutoff) break;
+							Q_slice += (double)U;
+						}
+						// Integrate from centerline outward in -y direction until U < cutoff
+						for(int y = (int)cy - 1; y >= 0; y--) {
+							const ulong n = (ulong)x + ((ulong)y + (ulong)z * (ulong)Ny) * (ulong)Nx;
+							const float U = lbm.u.x[n];
+							if(fabs(U) < cutoff) break;
+							Q_slice += (double)U;
+						}
+						sum_Q[ix] += Q_slice; // accumulate z-slices for 2D integral
+					}
 				}
-				sum_Q[ix] += Q;
 			}
 		}
 
@@ -367,18 +563,33 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 
 			lbm.u.read_from_device();
 
-			// Quick centerline check
+			// Quick centerline check (only show x/h >= 0 for readability)
 			string status = in_averaging_phase ? "AVERAGING" : "WARMUP";
 			string centerline_str = "";
 			for(int ix = 0; ix < num_x_stations; ix += 5) { // every 5th station
-				if(x_stations[ix] < Nx - 3u) {
-					const ulong n = (ulong)x_stations[ix] + ((ulong)cy + (ulong)cz * (ulong)Ny) * (ulong)Nx;
-					const float Uc = lbm.u.x[n];
-					centerline_str += " x/h=" + to_string((int)xh_values[ix]) + ":" + to_string(Uc/lbm_u, 2u);
-				}
+				if(x_stations[ix] <= 1u) continue; // skip inlet BC region
+				if(x_stations[ix] >= Nx - 3u) continue;
+				const ulong n = (ulong)x_stations[ix] + ((ulong)cy + (ulong)cz * (ulong)Ny) * (ulong)Nx;
+				const float Uc = lbm.u.x[n];
+				centerline_str += " x/h=" + to_string((int)xh_values[ix]) + ":" + to_string(Uc/lbm_u, 2u);
 			}
 
-			print_info("FT=" + to_string(ft, 2u) + " [" + status + "] samples=" + to_string(num_samples) + " | Uc/U0:" + centerline_str);
+			print_info("FT=" + to_string(ft, 2u) + " [" + status + "] samples=" + to_string(num_time_samples) + "x" + to_string(z_avg_count) + "=" + to_string(num_total_samples) + " | Uc/U0:" + centerline_str);
+
+#ifdef VREMAN_SGS
+			// Monitor Vreman nu_sgs at key centerline locations
+			string vreman_str = "";
+			const int monitor_xh[] = {0, 2, 5, 10, 15, 20}; // x/h locations to monitor
+			for(int i = 0; i < 6; i++) {
+				const int xh = monitor_xh[i];
+				const uint x_pos = (uint)(xh * h_cells);
+				if(x_pos >= 3 && x_pos < Nx - 3) {
+					const float nu_sgs = compute_vreman_nu_sgs(lbm, x_pos, cy, cz);
+					vreman_str += " x/h=" + to_string(xh) + ":" + to_string(nu_sgs, 6u);
+				}
+			}
+			print_info("Vreman nu_sgs:" + vreman_str);
+#endif // VREMAN_SGS
 		}
 
 		// ============ Periodic intermediate export during averaging phase ============
