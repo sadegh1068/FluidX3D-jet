@@ -206,7 +206,9 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 		}
 	});
 	// ####################################################################### run simulation ##########################################################################
+#ifdef GRAPHICS
 	lbm.graphics.visualization_modes = VIS_FIELD;
+#endif // GRAPHICS
 
 	// Calculate flow-through time (domain length / inlet velocity)
 	const float domain_length = (float)Nx;
