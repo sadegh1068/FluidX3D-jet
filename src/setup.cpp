@@ -112,7 +112,7 @@ void main_setup() { // benchmark; required extensions in defines.hpp: BENCHMARK,
 #ifndef BENCHMARK
 void main_setup() { // Simple rectangular jet test; required extensions: EQUILIBRIUM_BOUNDARIES, SUBGRID, INTERACTIVE_GRAPHICS
 	// ################################################################## define simulation box size, viscosity and volume force ###################################################################
-	const uint memory = 6000u; // MB VRAM (increased for better resolution)
+	const uint memory = 24000u; // MB VRAM for cloud VM (RTX PRO 6000 Blackwell, gives h≈58)
 	// Plane jet with tanh inlet profile - no nozzle, no correction factor needed
 	// U(y) = U_j/2 * (1 + tanh((h/2 - |y|) / (2*theta))), h/theta = 20
 	const float lbm_u = 0.05f; // inlet velocity in LBM units (jet centerline velocity)
@@ -206,7 +206,7 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 		}
 	});
 	// ####################################################################### run simulation ##########################################################################
-	lbm.graphics.visualization_modes = VIS_FIELD;
+	//lbm.graphics.visualization_modes = VIS_FIELD; // disabled for headless cloud
 
 	// Calculate flow-through time (domain length / inlet velocity)
 	const float domain_length = (float)Nx;
@@ -500,6 +500,7 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 		// ============ Collect statistics during averaging phase ============
 		// Uses spanwise averaging: sample at ALL Nz z-planes (periodic z)
 		if(in_averaging_phase) {
+			lbm.update_fields(); // compute rho/u from distributions (needed when UPDATE_FIELDS is not defined)
 			lbm.u.read_from_device();
 			num_time_samples++;
 			num_total_samples += (ulong)Nz; // all z-planes
@@ -561,6 +562,7 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 		if(lbm.get_t() >= next_report) {
 			next_report += report_interval;
 
+			lbm.update_fields(); // compute rho/u from distributions
 			lbm.u.read_from_device();
 
 			// Quick centerline check (only show x/h >= 0 for readability)
