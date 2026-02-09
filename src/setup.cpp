@@ -112,7 +112,7 @@ void main_setup() { // benchmark; required extensions in defines.hpp: BENCHMARK,
 #ifndef BENCHMARK
 void main_setup() { // Simple rectangular jet test; required extensions: EQUILIBRIUM_BOUNDARIES, SUBGRID, INTERACTIVE_GRAPHICS
 	// ################################################################## define simulation box size, viscosity and volume force ###################################################################
-	const uint memory = 48000u; // MB VRAM (48 GB on cloud RTX PRO 6000)
+	const uint memory = 35000u; // MB VRAM (limited by 24GB max OpenCL buffer allocation on RTX PRO 6000)
 	// Plane jet with tanh inlet profile - no nozzle, no correction factor needed
 	// U(y) = U_j/2 * (1 + tanh((h/2 - |y|) / (2*theta))), h/theta = 20
 	const float lbm_u = 0.05f; // inlet velocity in LBM units (jet centerline velocity)
