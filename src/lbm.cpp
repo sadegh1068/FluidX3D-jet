@@ -457,19 +457,7 @@ string LBM_Domain::device_defines() const { return
 
 #ifdef SUBGRID
 	"\n	#define SUBGRID"
-	// ZONAL Smagorinsky constants for jet simulation (Option A: reduced Cs for stability)
-	// Zone 1: Nozzle (x/h < 0)       -> Cs = 0.12 (preserve inlet TI)
-	// Zone 2: Near-field (0-8 x/h)   -> Cs = 0.15 (moderate K-H damping)
-	// Zone 3: Transition (8-15 x/h)  -> Cs = 0.14 (gentle damping)
-	// Zone 4: Far-field (>15 x/h)    -> Cs = 0.12 (matches experiment)
-	"\n	#define def_Cs_nozzle 0.12f"      // Zone 1: inside nozzle
-	"\n	#define def_Cs_nearfield 0.15f"   // Zone 2: K-H growth region
-	"\n	#define def_Cs_transition 0.14f"  // Zone 3: K-H breakdown region
-	"\n	#define def_Cs_farfield 0.12f"    // Zone 4: self-similar region
-	"\n	#define def_zone2_start -1.0f"    // x/h where Zone 2 starts (before inlet, ensures x=0 is fully Zone 2)
-	"\n	#define def_zone3_start 8.0f"     // x/h where Zone 3 starts
-	"\n	#define def_zone4_start 15.0f"    // x/h where Zone 4 starts
-	"\n	#define def_zone_blend_width 2.0f" // blending width in x/h units (tanh transition)
+	"\n	#define def_Cs_coefficient 0.36656640f" // 18*sqrt(2)*Cs^2, Cs=0.12 (uniform, optimized for jets per Stanley & Sarkar 1999)
 	"\n	#define def_h_cells "+to_string(Ny/20u)+"u" // nozzle height in cells (= Ny/20, scales with VRAM)
 	"\n	#define def_nozzle_x 0u" // nozzle exit at x=0 (no physical nozzle, tanh profile inlet)
 #endif // SUBGRID
