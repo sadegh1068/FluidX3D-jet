@@ -106,5 +106,6 @@
 
 #if defined(INTERACTIVE_GRAPHICS) || defined(INTERACTIVE_GRAPHICS_ASCII)
 #define GRAPHICS
-#define UPDATE_FIELDS // to prevent flickering artifacts in interactive graphics
 #endif // INTERACTIVE_GRAPHICS || INTERACTIVE_GRAPHICS_ASCII
+
+#define UPDATE_FIELDS // required: update (rho, u) every LBM step for statistics sampling and boundary conditions
