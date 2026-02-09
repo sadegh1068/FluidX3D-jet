@@ -1678,7 +1678,7 @@ string opencl_c_container() { return R( // ########################## begin of O
 		// sech²(x) = 1 - tanh²(x), peaks at nozzle lip; floor ensures 3.8% base TI
 		// matching experimental TI at x/h=0.2 (Ahmed et al.)
 		const float sech2_val = 1.0f - tanh_val * tanh_val;
-		const float TI = def_turbulence_intensity * fmax(sech2_val, 1.2f); // floor compensates ~37% damping: 0.05*1.2=6% at DFM → ~3.8% at x/h=0.2
+		const float TI = def_turbulence_intensity * fmax(sech2_val, 1.35f); // floor compensates ~44% damping: 0.05*1.35=6.75% at DFM → ~3.8% at x/h=0.2
 		const float U0 = def_inlet_velocity;
 		u_prime *= 1.0f * TI * U0;  // Streamwise: full intensity
 		v_prime *= 0.7f * TI * U0;  // Normal: 70% (provides negative <u'v'> indirectly)

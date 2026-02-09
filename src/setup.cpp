@@ -215,7 +215,7 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 	const uint report_interval = (uint)(flow_through_time / 2.0f); // report every 0.5 flow-through
 
 	// Timing parameters
-	const float warmup_FT = 5.0f; // warmup: 5 flow-through times (ignore initial transient)
+	const float warmup_FT = 2.0f; // warmup: 2 flow-through times (no ramp, tanh profile starts immediately)
 	const float averaging_FT = 30.0f; // averaging: 30 flow-through times (total 35 FT, then auto-stop)
 	const ulong warmup_steps = (ulong)(warmup_FT * flow_through_time);
 	const ulong total_steps = (ulong)((warmup_FT + averaging_FT) * flow_through_time);
