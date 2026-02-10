@@ -3374,6 +3374,29 @@ string opencl_c_container() { return R( // ########################## begin of O
 )+"#endif"+R( // PARTICLES
 )+"#endif"+R( // GRAPHICS
 
-
+)+R(kernel void extract_probe_velocities(const global float* u, const global uint* probe_coords, global float* probe_data, const uint num_probes, const uint write_index, const uint buffer_capacity) {
+	const uint p = get_global_id(0);
+	if(p>=num_probes) return;
+	const uint px = probe_coords[3u*p+0u];
+	const uint py = probe_coords[3u*p+1u];
+	const uint pz = probe_coords[3u*p+2u];
+	const uxx n = (uxx)px+((uxx)py+(uxx)pz*(uxx)def_Ny)*(uxx)def_Nx;
+	const ulong base = (ulong)write_index*(ulong)num_probes*3ul+(ulong)p*3ul;
+	probe_data[base+0ul] = u[n];
+	probe_data[base+1ul] = u[def_N+(ulong)n];
+	probe_data[base+2ul] = u[2ul*def_N+(ulong)n];
+}
+)+R(kernel void extract_midplane_velocities(const global float* u, global float* midplane_data, const uint cz, const uint snapshot_in_batch, const uint plane_Nx, const uint plane_Ny) {
+	const uint idx = get_global_id(0);
+	const uint plane_N = plane_Nx*plane_Ny;
+	if(idx>=plane_N) return;
+	const uint px = idx%plane_Nx;
+	const uint py = idx/plane_Nx;
+	const uxx n = (uxx)px+((uxx)py+(uxx)cz*(uxx)def_Ny)*(uxx)def_Nx;
+	const ulong base = (ulong)snapshot_in_batch*(ulong)plane_N*3ul+(ulong)idx*3ul;
+	midplane_data[base+0ul] = u[n];
+	midplane_data[base+1ul] = u[def_N+(ulong)n];
+	midplane_data[base+2ul] = u[2ul*def_N+(ulong)n];
+}
 
 );} // ############################################################### end of OpenCL C code #####################################################################

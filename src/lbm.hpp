@@ -120,6 +120,7 @@ public:
 	void finish_queue();
 
 	const Device& get_device() const { return device; }
+	Device& get_mutable_device() { return device; } // non-const access for external Memory/Kernel creation
 	uint get_Nx() const { return Nx; } // get (local) lattice dimensions in x-direction
 	uint get_Ny() const { return Ny; } // get (local) lattice dimensions in y-direction
 	uint get_Nz() const { return Nz; } // get (local) lattice dimensions in z-direction

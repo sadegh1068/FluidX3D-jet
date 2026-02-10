@@ -274,6 +274,159 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 	print_info("Spanwise averaging: ALL " + to_string(z_avg_count) + " z-planes (periodic z, " + to_string(z_avg_count) + "x faster convergence)");
 	print_info("----------------------------------------");
 
+	// ============ Probe sampling for FFT/PSD (GPU-side extraction) ============
+	const uint probe_sample_interval = 10u; // sample every 10 LBM timesteps
+	const uint probe_z = Nz / 2u; // all probes on mid-plane
+	struct ProbeLocation { uint x, y, z; float xh, yh; };
+	vector<ProbeLocation> probes;
+	probes.reserve(64);
+	auto add_probe = [&](float xh, float yh) {
+		ProbeLocation p;
+		p.xh = xh; p.yh = yh;
+		p.x = (uint)max(0, (int)round(xh * (float)h_cells));
+		p.y = (uint)max(0, (int)((int)cy + (int)round(yh * (float)h_cells)));
+		p.z = probe_z;
+		if(p.x >= 2u && p.x < Nx - 3u && p.y >= 2u && p.y < Ny - 2u) {
+			probes.push_back(p);
+		}
+	};
+	// Centerline probes (y/h=0): 12 stations
+	const float cl_xh[] = {0.5f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 8.0f, 10.0f, 15.0f, 20.0f, 30.0f};
+	for(int i = 0; i < 12; i++) add_probe(cl_xh[i], 0.0f);
+	// Lip line probes (y/h=+/-0.5): 9 stations x 2 sides = 18
+	const float lip_xh[] = {0.5f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 8.0f, 10.0f};
+	for(int i = 0; i < 9; i++) { add_probe(lip_xh[i], 0.5f); add_probe(lip_xh[i], -0.5f); }
+	// Cross-stream traverses at x/h=2,5,10: y/h = +/-0.25, +/-0.75, +/-1.0, +/-1.5, +/-2.0
+	const float cs_xh[] = {2.0f, 5.0f, 10.0f};
+	const float cs_yh[] = {0.25f, -0.25f, 0.75f, -0.75f, 1.0f, -1.0f, 1.5f, -1.5f, 2.0f, -2.0f};
+	for(int i = 0; i < 3; i++) for(int j = 0; j < 10; j++) add_probe(cs_xh[i], cs_yh[j]);
+	const uint num_probes = (uint)probes.size();
+
+	// ============ Mid-plane snapshots for POD (GPU-side extraction) ============
+	const uint midplane_snapshot_interval = 300u; // snapshot every 300 timesteps
+	const uint midplane_batch_size = 10u; // batch on GPU before transfer
+	const ulong plane_N = (ulong)Nx * (ulong)Ny;
+
+	// Buffer capacity calculations
+	const ulong averaging_steps = total_steps - warmup_steps;
+	const ulong probe_total_samples = averaging_steps / (ulong)probe_sample_interval;
+	const ulong probe_quarter_samples = (probe_total_samples + 3ul) / 4ul; // 4 exports (3 mid-way + 1 final)
+	const ulong probe_buffer_floats = (ulong)num_probes * 3ul * probe_quarter_samples;
+	const ulong midplane_buffer_floats = plane_N * 3ul * (ulong)midplane_batch_size;
+
+	print_info("Probe sampling: " + to_string(num_probes) + " probes, every " + to_string(probe_sample_interval) + " steps, " + to_string(probe_quarter_samples) + " samples/quarter (" + to_string((probe_buffer_floats * 4ul) / (1024ul * 1024ul)) + " MB buffer)");
+	print_info("Mid-plane POD: " + to_string(Nx) + "x" + to_string(Ny) + " plane, every " + to_string(midplane_snapshot_interval) + " steps, batch=" + to_string(midplane_batch_size) + " (" + to_string((midplane_buffer_floats * 4ul) / (1024ul * 1024ul)) + " MB buffer)");
+	print_info("Mid-plane snapshot size: " + to_string((plane_N * 3ul * 4ul) / (1024ul * 1024ul)) + " MB, estimated total: " + to_string(averaging_steps / midplane_snapshot_interval) + " snapshots");
+
+	// GPU buffer and kernel creation
+	Device& dev = lbm.lbm_domain[0]->get_mutable_device();
+	const Device& cdev = lbm.lbm_domain[0]->get_device();
+
+	// Probe coordinates: flat [x0,y0,z0,x1,y1,z1,...], uploaded once
+	Memory<uint> probe_coords_gpu(dev, (ulong)num_probes * 3ul);
+	for(uint i = 0u; i < num_probes; i++) {
+		probe_coords_gpu[3u * i + 0u] = probes[i].x;
+		probe_coords_gpu[3u * i + 1u] = probes[i].y;
+		probe_coords_gpu[3u * i + 2u] = probes[i].z;
+	}
+	probe_coords_gpu.enqueue_write_to_device();
+	lbm.lbm_domain[0]->finish_queue();
+
+	// Probe data ring buffer (one quarter at a time)
+	Memory<float> probe_data_gpu(dev, probe_buffer_floats);
+
+	// Midplane snapshot batch buffer
+	Memory<float> midplane_data_gpu(dev, midplane_buffer_floats);
+
+	// Create extraction kernels
+	Kernel kernel_extract_probes(cdev, (ulong)num_probes, "extract_probe_velocities",
+		lbm.lbm_domain[0]->u, probe_coords_gpu, probe_data_gpu,
+		num_probes, 0u, (uint)probe_quarter_samples);
+
+	Kernel kernel_extract_midplane(cdev, (ulong)(Nx * Ny), "extract_midplane_velocities",
+		lbm.lbm_domain[0]->u, midplane_data_gpu,
+		Nz / 2u, 0u, Nx, Ny);
+
+	// Probe/midplane state tracking
+	uint probe_write_idx = 0u;
+	uint probe_quarter = 0u;
+	ulong probe_samples_written = 0ul;
+	uint midplane_snapshot_count = 0u;
+	uint midplane_batch_idx = 0u;
+	vector<std::pair<uint, ulong>> midplane_snapshot_log;
+	midplane_snapshot_log.reserve(2500);
+
+	// Binary file output path
+	const string bin_path = get_exe_path();
+
+	// Write probe metadata once at start
+	{
+		const string filename = bin_path + "probe_metadata.csv";
+		std::ofstream f(filename);
+		f << "probe_index,x,y,z,x_over_h,y_over_h\n";
+		for(uint i = 0; i < num_probes; i++) {
+			f << i << "," << probes[i].x << "," << probes[i].y << "," << probes[i].z
+			  << "," << probes[i].xh << "," << probes[i].yh << "\n";
+		}
+		f << "\n# num_probes=" << num_probes << "\n";
+		f << "# sample_interval_steps=" << probe_sample_interval << "\n";
+		f << "# quarter_samples=" << probe_quarter_samples << "\n";
+		f << "# warmup_steps=" << warmup_steps << "\n";
+		f << "# components=3 (ux,uy,uz)\n";
+		f << "# binary_layout=float32_le shape=(num_samples,num_probes,3)\n";
+		f.close();
+		print_info("Wrote " + filename);
+	}
+
+	// Open midplane binary file (append mode)
+	const string midplane_bin_filename = bin_path + "midplane_snapshots.bin";
+	std::ofstream midplane_file(midplane_bin_filename, std::ios::out | std::ios::binary | std::ios::trunc);
+
+	// Helper lambdas for data export
+	auto flush_probe_quarter = [&]() {
+		if(probe_samples_written == 0ul) return;
+		probe_data_gpu.enqueue_read_from_device();
+		lbm.lbm_domain[0]->finish_queue();
+		const string filename = bin_path + "probe_data_q" + to_string(probe_quarter) + ".bin";
+		std::ofstream f(filename, std::ios::out | std::ios::binary);
+		f.write(reinterpret_cast<const char*>(probe_data_gpu.data()), (std::streamsize)(probe_samples_written * (ulong)num_probes * 3ul * sizeof(float)));
+		f.close();
+		print_info("Wrote probe quarter " + to_string(probe_quarter) + ": " + to_string(probe_samples_written) + " samples -> " + filename);
+		probe_quarter++;
+		probe_write_idx = 0u;
+		probe_samples_written = 0ul;
+	};
+
+	auto flush_midplane_batch = [&]() {
+		if(midplane_batch_idx == 0u) return;
+		midplane_data_gpu.enqueue_read_from_device();
+		lbm.lbm_domain[0]->finish_queue();
+		midplane_file.write(reinterpret_cast<const char*>(midplane_data_gpu.data()), (std::streamsize)((ulong)midplane_batch_idx * plane_N * 3ul * sizeof(float)));
+		midplane_file.flush();
+		print_info("Flushed " + to_string(midplane_batch_idx) + " mid-plane snapshots (" + to_string(midplane_snapshot_count) + " total)");
+		midplane_batch_idx = 0u;
+	};
+
+	auto write_midplane_metadata = [&]() {
+		const string filename = bin_path + "midplane_metadata.csv";
+		std::ofstream f(filename);
+		f << "snapshot_index,timestep,flow_through_time\n";
+		for(const auto& entry : midplane_snapshot_log) {
+			f << entry.first << "," << entry.second << "," << ((float)entry.second / flow_through_time) << "\n";
+		}
+		f << "\n# Nx=" << Nx << " Ny=" << Ny << "\n";
+		f << "# plane_z=" << (Nz / 2u) << "\n";
+		f << "# snapshot_interval_steps=" << midplane_snapshot_interval << "\n";
+		f << "# total_snapshots=" << midplane_snapshot_count << "\n";
+		f << "# components=3 (ux,uy,uz)\n";
+		f << "# binary_layout=float32_le shape=(num_snapshots," << Ny << "," << Nx << ",3)\n";
+		f << "# bytes_per_snapshot=" << (plane_N * 3ul * sizeof(float)) << "\n";
+		f.close();
+		print_info("Wrote " + filename);
+	};
+
+	print_info("----------------------------------------");
+
 	ulong next_report = report_interval;
 	bool data_exported = false;
 	const float export_interval_FT = 0.5f; // export every 0.5 flow-through after warmup
@@ -492,16 +645,59 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 	};
 
 	while(lbm.get_t() <= total_steps) {
-		lbm.run(sample_interval);
+		const ulong current_t = lbm.get_t();
+		const bool in_averaging = (current_t >= warmup_steps);
 
-		const float ft = (float)lbm.get_t() / flow_through_time;
-		const bool in_averaging_phase = (lbm.get_t() > warmup_steps);
+		// Event-driven sub-stepping: fine granularity during averaging for probe/midplane sampling
+		uint steps_to_run;
+		if(!in_averaging) {
+			// Warmup: run in chunks of sample_interval, capped at warmup boundary
+			steps_to_run = (uint)min((ulong)sample_interval, warmup_steps - current_t);
+		} else {
+			// Averaging: run to next probe event (finest granularity = 10 steps)
+			uint to_next_probe = probe_sample_interval - (uint)(current_t % (ulong)probe_sample_interval);
+			if(to_next_probe == 0u) to_next_probe = probe_sample_interval;
+			steps_to_run = to_next_probe;
+			if(current_t + (ulong)steps_to_run > total_steps) steps_to_run = (uint)(total_steps - current_t);
+		}
+		if(steps_to_run == 0u) break;
+		lbm.run(steps_to_run);
 
-		// ============ Collect statistics during averaging phase ============
+		const ulong t = lbm.get_t();
+		const float ft = (float)t / flow_through_time;
+		const bool in_averaging_phase = (t > warmup_steps);
+		bool fields_updated = false;
+		bool u_on_host = false;
+
+		// ============ Probe sampling for FFT/PSD (every 10 steps during averaging) ============
+		if(in_averaging_phase && t % (ulong)probe_sample_interval == 0ul) {
+			if(!fields_updated) { lbm.update_fields(); fields_updated = true; }
+			kernel_extract_probes.set_parameters(4u, probe_write_idx).enqueue_run();
+			probe_write_idx++;
+			probe_samples_written++;
+			if(probe_write_idx >= (uint)probe_quarter_samples) {
+				flush_probe_quarter();
+			}
+		}
+
+		// ============ Mid-plane snapshot for POD (every 300 steps during averaging) ============
+		if(in_averaging_phase && t % (ulong)midplane_snapshot_interval == 0ul) {
+			if(!fields_updated) { lbm.update_fields(); fields_updated = true; }
+			kernel_extract_midplane.set_parameters(3u, midplane_batch_idx).enqueue_run();
+			midplane_snapshot_log.push_back({midplane_snapshot_count, t});
+			midplane_snapshot_count++;
+			midplane_batch_idx++;
+			if(midplane_batch_idx >= midplane_batch_size) {
+				flush_midplane_batch();
+			}
+		}
+
+		// ============ Collect statistics (every sample_interval steps during averaging) ============
 		// Uses spanwise averaging: sample at ALL Nz z-planes (periodic z)
-		if(in_averaging_phase) {
-			lbm.update_fields(); // compute rho/u from distributions (needed when UPDATE_FIELDS is not defined)
+		if(in_averaging_phase && t % (ulong)sample_interval == 0ul) {
+			if(!fields_updated) { lbm.update_fields(); fields_updated = true; }
 			lbm.u.read_from_device();
+			u_on_host = true;
 			num_time_samples++;
 			num_total_samples += (ulong)Nz; // all z-planes
 
@@ -559,11 +755,11 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 		}
 
 		// ============ Periodic reporting ============
-		if(lbm.get_t() >= next_report) {
+		if(t >= next_report) {
 			next_report += report_interval;
 
-			lbm.update_fields(); // compute rho/u from distributions
-			lbm.u.read_from_device();
+			if(!fields_updated) { lbm.update_fields(); fields_updated = true; }
+			if(!u_on_host) { lbm.u.read_from_device(); u_on_host = true; }
 
 			// Quick centerline check (only show x/h >= 0 for readability)
 			string status = in_averaging_phase ? "AVERAGING" : "WARMUP";
@@ -603,7 +799,7 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 		}
 
 		// ============ Final export after averaging phase ============
-		if(lbm.get_t() >= total_steps && !data_exported) {
+		if(t >= total_steps && !data_exported) {
 			print_info("========================================");
 			print_info("FINAL EXPORT at FT=" + to_string(ft, 2u));
 			export_csv_data("", true); // empty suffix for final files
@@ -611,6 +807,13 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 			data_exported = true;
 		}
 	}
+
+	// ============ Final flush of remaining probe/midplane data ============
+	flush_probe_quarter(); // flush any remaining probe samples in the current quarter
+	flush_midplane_batch(); // flush any remaining midplane snapshots in the current batch
+	write_midplane_metadata();
+	midplane_file.close();
+	print_info("All probe and mid-plane data exported.");
 
 	// Stop simulation after export is complete
 	print_info("========================================");
