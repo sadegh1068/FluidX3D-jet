@@ -1788,45 +1788,8 @@ string opencl_c_container() { return R( // ########################## begin of O
 	float w = def_w; // LBM relaxation rate w = dt/tau = dt/(nu/c^2+dt/2) = 1/(3*nu+1/2)
 
 )+"#ifdef SUBGRID"+R(
-	{ // ZONAL Smagorinsky-Lilly subgrid turbulence model for jet simulation
-		// Zone-dependent Cs (Option A: reduced for stability while preserving spreading rate):
-		// - Zone 1 (nozzle, x/h<0): Cs=0.12 - preserve inlet TI calibration
-		// - Zone 2 (near-field, x/h=0-8): Cs=0.15 - moderate K-H damping
-		// - Zone 3 (transition, x/h=8-15): Cs=0.14 - gentle damping
-		// - Zone 4 (far-field, x/h>15): Cs=0.12 - matches experiment
+	{ // Smagorinsky-Lilly subgrid turbulence model (Cs=0.12, optimized for jets)
 		const float tau0 = 1.0f/w;
-
-		// Get x position and compute x/h relative to nozzle exit
-		const uint3 xyz = coordinates(n);
-		const float x_rel = (float)xyz.x - (float)def_nozzle_x; // x relative to nozzle exit (cells)
-		const float xh = x_rel / (float)def_h_cells; // x/h position
-
-		// Smooth blending using fast sigmoid approximation (replaces 3x expensive tanh)
-		// fast_sigmoid(x) = 0.5 + 0.5 * x / (1 + fabs(x)) ≈ 0.5 + 0.5*tanh(x)
-		// Max error vs tanh: ~7% at |x|=1, but blend shape is equally smooth
-		const float inv_blend = 2.0f / def_zone_blend_width; // 1/(0.5*width)
-
-		// Compute blend factors for each zone transition
-		const float a12 = (xh - def_zone2_start) * inv_blend;
-		const float a23 = (xh - def_zone3_start) * inv_blend;
-		const float a34 = (xh - def_zone4_start) * inv_blend;
-		const float blend_12 = 0.5f + 0.5f * a12 / (1.0f + fabs(a12)); // 0 in zone1, 1 in zone2+
-		const float blend_23 = 0.5f + 0.5f * a23 / (1.0f + fabs(a23)); // 0 in zone2, 1 in zone3+
-		const float blend_34 = 0.5f + 0.5f * a34 / (1.0f + fabs(a34)); // 0 in zone3, 1 in zone4
-
-		// Compute Cs by interpolating between zones
-		// Zone 1 -> Zone 2: Cs_nozzle -> Cs_nearfield
-		// Zone 2 -> Zone 3: Cs_nearfield -> Cs_transition
-		// Zone 3 -> Zone 4: Cs_transition -> Cs_farfield
-		float Cs = def_Cs_nozzle;
-		Cs = fma(blend_12, def_Cs_nearfield - def_Cs_nozzle, Cs);     // blend to zone 2
-		Cs = fma(blend_23, def_Cs_transition - def_Cs_nearfield, Cs); // blend to zone 3
-		Cs = fma(blend_34, def_Cs_farfield - def_Cs_transition, Cs);  // blend to zone 4
-
-		// Compute coefficient K = 18*sqrt(2)*Cs^2
-		const float K_coeff = 25.45584412f * Cs * Cs; // 25.456 = 18*sqrt(2)
-
-		// Compute non-equilibrium stress tensor
 		float Hxx=0.0f, Hyy=0.0f, Hzz=0.0f, Hxy=0.0f, Hxz=0.0f, Hyz=0.0f;
 		for(uint i=1u; i<def_velocity_set; i++) {
 			const float fneqi = fhn[i]-feq[i];
@@ -1836,10 +1799,8 @@ string opencl_c_container() { return R( // ########################## begin of O
 			Hxz += cxi*czi*fneqi; Hyz += cyi*czi*fneqi; Hzz += czi*czi*fneqi;
 		}
 		const float Q = sq(Hxx)+sq(Hyy)+sq(Hzz)+2.0f*(sq(Hxy)+sq(Hxz)+sq(Hyz));
-
-		// Apply Smagorinsky formula with zonal Cs
-		w = 2.0f/(tau0+sqrt(sq(tau0)+K_coeff*sqrt(Q)/rhon));
-	} // Zonal Smagorinsky SGS for jet - TI-optimized
+		w = 2.0f/(tau0+sqrt(sq(tau0)+0.36656640f*sqrt(Q)/rhon)); // K = 18*sqrt(2)*0.12^2
+	}
 )+"#endif"+R( // SUBGRID
 
 )+"#ifdef VREMAN_SGS"+R(

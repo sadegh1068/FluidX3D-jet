@@ -112,7 +112,7 @@ void main_setup() { // benchmark; required extensions in defines.hpp: BENCHMARK,
 #ifndef BENCHMARK
 void main_setup() { // Simple rectangular jet test; required extensions: EQUILIBRIUM_BOUNDARIES, SUBGRID, INTERACTIVE_GRAPHICS
 	// ################################################################## define simulation box size, viscosity and volume force ###################################################################
-	const uint memory = 24000u; // MB VRAM for cloud VM (RTX PRO 6000 Blackwell, gives h≈58)
+	const uint memory = 48000u; // MB VRAM for cloud VM (RTX PRO 6000 Blackwell, 97GB available)
 	// Plane jet with tanh inlet profile - no nozzle, no correction factor needed
 	// U(y) = U_j/2 * (1 + tanh((h/2 - |y|) / (2*theta))), h/theta = 20
 	const float lbm_u = 0.05f; // inlet velocity in LBM units (jet centerline velocity)
@@ -215,7 +215,7 @@ void main_setup() { // Simple rectangular jet test; required extensions: EQUILIB
 	const uint report_interval = (uint)(flow_through_time / 2.0f); // report every 0.5 flow-through
 
 	// Timing parameters
-	const float warmup_FT = 2.0f; // warmup: 2 flow-through times (no ramp, tanh profile starts immediately)
+	const float warmup_FT = 5.0f; // warmup: 5 flow-through times (no ramp, tanh profile starts immediately)
 	const float averaging_FT = 30.0f; // averaging: 30 flow-through times (total 35 FT, then auto-stop)
 	const ulong warmup_steps = (ulong)(warmup_FT * flow_through_time);
 	const ulong total_steps = (ulong)((warmup_FT + averaging_FT) * flow_through_time);
