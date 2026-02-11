@@ -26,7 +26,7 @@
 //#define PARTICLES // enables particles with immersed-boundary method (for 2-way coupling also activate VOLUME_FORCE and FORCE_FIELD; only supported in single-GPU)
 
 #define DFM_INLET // Digital Filter Method for turbulent inlet; uses TYPE_X to mark inlet cells; generates spatially correlated turbulent fluctuations
-//#define SPONGE_ZONE // DISABLED - was forcing velocity and creating artificial pressure gradients
+#define VISCOSITY_SPONGE // Viscosity ramping sponge: increases tau near outlet and lateral boundaries to damp turbulence (Xu & Sagaut 2013)
 #define CONVECTIVE_OUTLET // Orlanski convective outlet BC; uses TYPE_Y to mark outlet cells; allows flow to exit naturally
 #define ENTRAINMENT_BC // Entrainment-friendly lateral BC; allows inflow (entrainment) at lateral TYPE_E boundaries while preventing artificial confinement
 

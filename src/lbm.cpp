@@ -480,11 +480,12 @@ string LBM_Domain::device_defines() const { return
 	"\n	#define def_temporal_alpha 0.95f" // temporal correlation factor exp(-dt/T), ~0.95 for smooth time evolution
 #endif // DFM_INLET
 
-#ifdef SPONGE_ZONE
-	"\n	#define SPONGE_ZONE"
-	"\n	#define def_sponge_start 0.95f" // sponge zone starts at 95% of domain length (moved downstream for cleaner far-field)
-	"\n	#define def_sponge_strength 0.1f" // damping strength (0=no damping, 1=full damping)
-#endif // SPONGE_ZONE
+#ifdef VISCOSITY_SPONGE
+	"\n	#define VISCOSITY_SPONGE"
+	"\n	#define def_sponge_start_x 0.82f" // outlet sponge starts at 82% of domain (leaves ~5h sponge width)
+	"\n	#define def_sponge_width_y "+to_string(5u*(Ny/20u))+"u" // lateral sponge width: 5h in cells (from each y-face)
+	"\n	#define def_sponge_delta_tau "+to_string(99.0f*(get_tau()-0.5f))+"f" // tau increase for 100x viscosity: 99*(tau_phys-0.5)
+#endif // VISCOSITY_SPONGE
 
 #ifdef CONVECTIVE_OUTLET
 	"\n	#define CONVECTIVE_OUTLET"

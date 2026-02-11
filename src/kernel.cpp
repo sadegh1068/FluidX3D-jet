@@ -1722,30 +1722,6 @@ string opencl_c_container() { return R( // ########################## begin of O
 	}
 )+"#endif"+R( // DFM_INLET
 
-)+"#ifdef SPONGE_ZONE"+R(
-	{ // Sponge zone: damp velocity fluctuations near outlet
-		const uint3 xyz = coordinates(n);
-		const float x_normalized = (float)xyz.x / (float)(def_Nx - 1u); // 0 to 1
-
-		if(x_normalized > def_sponge_start) {
-			// Quintic smooth damping profile: sigma = strength * (6*xi^5 - 15*xi^4 + 10*xi^3)
-			const float xi = (x_normalized - def_sponge_start) / (1.0f - def_sponge_start); // 0 to 1 in sponge
-			const float sigma = def_sponge_strength * xi * xi * xi * (10.0f - 15.0f * xi + 6.0f * xi * xi);
-
-			// FIX: Damp toward AMBIENT (zero velocity), NOT a target velocity
-			// Sponge should absorb fluctuations and let flow naturally decelerate to ambient
-			// Setting a non-zero target creates artificial suction!
-			const float ux_target = 0.0f;  // Ambient = zero velocity
-			const float uy_target = 0.0f;
-			const float uz_target = 0.0f;
-
-			// Damp velocity toward target (allows flow exit, removes fluctuations)
-			uxn = fma(1.0f - sigma, uxn, sigma * ux_target);
-			uyn = fma(1.0f - sigma, uyn, sigma * uy_target);
-			uzn = fma(1.0f - sigma, uzn, sigma * uz_target);
-		}
-	}
-)+"#endif"+R( // SPONGE_ZONE
 
 	{ // separate block to avoid variable name conflicts
 )+"#ifdef VOLUME_FORCE"+R( // apply force and collision operator, write to fi in video memory
@@ -1786,6 +1762,36 @@ string opencl_c_container() { return R( // ########################## begin of O
 	float feq[def_velocity_set]; // equilibrium DDFs
 	calculate_f_eq(rhon, uxn, uyn, uzn, feq); // calculate equilibrium DDFs
 	float w = def_w; // LBM relaxation rate w = dt/tau = dt/(nu/c^2+dt/2) = 1/(3*nu+1/2)
+
+)+"#ifdef VISCOSITY_SPONGE"+R(
+	{ // Viscosity sponge: increase tau near outlet and lateral boundaries (cubic profile)
+		// References: Xu & Sagaut (2013), Bodony (2006), Pant & Bhattacharya (2016)
+		const uint3 xyz = coordinates(n);
+		float sigma = 0.0f;
+
+		// Outlet sponge (x-direction): cubic ramp from x_start to domain end
+		const float x_frac = (float)xyz.x / (float)(def_Nx - 1u);
+		if(x_frac > def_sponge_start_x) {
+			const float xi = (x_frac - def_sponge_start_x) / (1.0f - def_sponge_start_x); // 0 to 1
+			sigma = fmax(sigma, xi * xi * xi); // cubic profile
+		}
+
+		// Lateral sponge (y-direction, both faces): cubic ramp from inner edge to boundary
+		if(xyz.y < def_sponge_width_y) {
+			const float xi = 1.0f - (float)xyz.y / (float)def_sponge_width_y; // 1 at boundary, 0 at inner edge
+			sigma = fmax(sigma, xi * xi * xi);
+		} else if(xyz.y >= def_Ny - def_sponge_width_y) {
+			const float xi = (float)(xyz.y - (def_Ny - def_sponge_width_y)) / (float)(def_sponge_width_y - 1u); // 0 at inner edge, 1 at boundary
+			sigma = fmax(sigma, xi * xi * xi);
+		}
+
+		// Modify relaxation rate: increase tau by sigma * delta_tau
+		if(sigma > 0.0f) {
+			const float tau_new = 1.0f / w + sigma * def_sponge_delta_tau;
+			w = 1.0f / tau_new;
+		}
+	}
+)+"#endif"+R( // VISCOSITY_SPONGE
 
 )+"#ifdef SUBGRID"+R(
 	{ // Smagorinsky-Lilly subgrid turbulence model (Cs=0.12, optimized for jets)
